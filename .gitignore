@@ -1,0 +1,9 @@
+tmp/
+.sites-runtime/
+__pycache__/
+node_modules/
+
+.env
+.env.*
+!.env.example
+scripts/add_import_ui.py

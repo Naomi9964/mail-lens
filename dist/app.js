@@ -1,31 +1,69 @@
 'use strict';
-const $=id=>document.getElementById(id);
-const samples={phishing:{sender:'帳戶安全中心 <security@account-verify.example>',subject:'緊急：您的帳號將於 24 小時內停權',body:'親愛的用戶您好：\n\n我們偵測到異常登入。請立即驗證帳號，否則將於 24 小時內停權。\n請開啟以下網址，輸入密碼及一次性驗證碼完成認證：\nhttp://account-verify.example/login\n\n請勿聯絡其他客服，依照此郵件指示操作即可。\n帳戶安全中心\n\n（教學範例，使用保留網域 .example）'},normal:{sender:'王怡婷 <yiting@example.com>',subject:'週三專案會議議程',body:'大家好，\n\n週三下午兩點在第三會議室討論專案進度。\n請準備本週工作摘要，以及需要協調的事項。\n如時間不便，請在原本的團隊群組留言。\n\n謝謝！\n怡婷\n\n（教學範例）'}};
-function analyze(data){
- const {sender='',subject='',body=''}=data;
- if(typeof body!=='string'||typeof sender!=='string'||typeof subject!=='string'||!body.trim())throw Error('請先貼上要分析的郵件內容。');
- if(body.length>100000||sender.length>500||subject.length>2000)throw Error('內容超過長度限制。');
- const text=subject+'\n'+body,findings=[];
- function add(id,title,points,evidence,why){if(!findings.some(f=>f.id===id))findings.push({id,title,points,evidence:String(evidence).slice(0,350),why});}
- const rules=[['urgent','以急迫感催促操作',15,/緊急|立即|停權|凍結|最後通[知牒]|24\s*小時|urgent|suspend|act now|within 24 hours/i,'短時間內威脅停權或要求立即操作，可能讓收件者來不及查證；正常通知也可能使用這些措辭。'],['secret','要求密碼或驗證碼',30,/(?:輸入|提供|回覆|確認|驗證|重設).{0,25}(?:密碼|驗證碼|信用卡|身分證)|(?:enter|provide|confirm|verify).{0,35}(?:password|otp|credit card|verification code)/i,'密碼、一次性驗證碼與付款資料是常見竊取目標。請自行開啟官方 App 或既有書籤確認。'],['payment','金錢、禮物或付款誘因',15,/匯款|轉帳|中獎|領獎|退款|禮品卡|gift card|wire transfer|lottery|claim.{0,15}prize/i,'付款要求與獎勵可能被用來誘導操作；應透過原有管道獨立確認交易。'],['isolate','阻止你向他人查證',15,/請勿聯絡|不要告訴|保密處理|do not (?:tell|contact)|keep.{0,10}secret/i,'阻止收件者向客服或同事查證，會增加社交工程風險。'],['attachment','提到高風險附件或執行檔',25,/\b[\w.-]+\.(?:exe|scr|js|vbs|bat|cmd|iso|lnk|docm|xlsm)\b|啟用巨集|enable macros/i,'執行檔、捷徑及含巨集文件可能執行程式。這裡只偵測文字線索，並未掃描附件。']];
- for(const [id,title,p,re,why] of rules){const m=text.match(re);if(m)add(id,title,p,m[0],why);}
- const links=[...new Set(text.match(/https?:\/\/[^\s<>"']+/gi)||[])];
- for(const raw of links){try{const u=new URL(raw.replace(/[。，、)]+$/,''));if(u.protocol==='http:')add('http','連結使用未加密 HTTP',10,u.href,'HTTP 無法保護傳輸內容；單憑 HTTPS 也不能證明網站可信。');if(u.username||u.password)add('userinfo','網址含有易誤導的 @ 區段',25,u.href,'@ 前的文字不是目的地主機。實際連線主機為 '+u.hostname+'。');if(/^(?:\d{1,3}\.){3}\d{1,3}$/.test(u.hostname)||u.hostname.startsWith('['))add('ip','連結直接使用 IP 位址',20,u.hostname,'IP 位址較難讓人辨認服務身份，但內部系統也可能正常使用。');if(/(^|\.)(bit\.ly|tinyurl\.com|t\.co|rebrand\.ly|shorturl\.at)$/i.test(u.hostname))add('short','短網址隱藏最終目的地',15,u.hostname,'此系統不展開短網址，因此無法確認它會轉向哪裡。');if(u.hostname.includes('xn--'))add('puny','網域使用國際化編碼',15,u.hostname,'國際化網域可合法使用，但相似字形也可能用於冒充，請逐字核對官方網址。');}catch{}}
- const a=/<a\b[^>]*href\s*=\s*["'](https?:\/\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;let m;
- while((m=a.exec(body))){try{const shown=m[2].replace(/<[^>]*>/g,'').trim();if(/^https?:\/\//i.test(shown)&&new URL(shown).hostname!==new URL(m[1]).hostname)add('mismatch','顯示網址與實際連結不同',30,shown+' → '+m[1],'連結文字宣稱的網域與實際目的地不同，是重要警訊；有些追蹤連結也會產生差異。');}catch{}}
- const from=sender.match(/[\w.+-]+@([\w.-]+\.[a-z]{2,})/i);const reply=body.match(/^reply-to:\s*.*?([\w.+-]+@([\w.-]+\.[a-z]{2,}))/im);
- if(from&&reply&&from[1].toLowerCase()!==reply[2].toLowerCase())add('reply','回覆地址與寄件網域不同',15,from[1]+' → '+reply[2],'回覆可能送往另一個網域；客服平台也可能如此設定，請再確認來源。');
- const auth=body.match(/\b(?:spf|dkim|dmarc)=(?:fail|softfail)\b/i);if(auth)add('auth','貼上的標頭宣稱郵件驗證失敗',20,auth[0],'這只是文字比對，無法驗證標頭可信度。應以收信服務顯示的驗證結果為準。');
- const score=Math.min(100,findings.reduce((s,f)=>s+f.points,0));return{score,level:score>=50?'high':score>=20?'medium':'low',findings,linkCount:links.length};
-}
-function element(tag,text,cls){const e=document.createElement(tag);if(text)e.textContent=text;if(cls)e.className=cls;return e;}
+const $=id=>document.getElementById(id),fields=['sender','subject','body','headers','expected','attachments'];
+const samples={phishing:{sender:'Account Security <security@account-check.example>',subject:'Urgent: account suspended within 24 hours',body:'Please enter your password and verification code immediately.\nDo not contact your normal support team.\n<a href="http://account-check.example/login">https://bank.example/login</a>\n\nTraining sample: reserved .example domains.',expected:'bank.example',headers:'From: Account Security <security@account-check.example>\nAuthentication-Results: mx.example; spf=fail; dkim=fail; dmarc=fail'},bec:{sender:'Finance Director <finance@vendor.example>',subject:'Updated payment instructions',body:'Please process the payment today using our new bank account. Keep this confidential until the transfer is complete.\nThe revised invoice is attached.\n\nTraining sample: reserved .example domains.',headers:'From: Finance Director <finance@vendor.example>\nReply-To: accounts@payment-change.example\nAuthentication-Results: mx.example; spf=pass; dkim=pass; dmarc=pass',expected:'vendor.example',attachments:'invoice.pdf'},normal:{sender:'Alex Chen <alex@example.com>',subject:'Wednesday project meeting',body:'Hi team,\n\nWe will meet in Room 3 at 2 PM on Wednesday to review project progress. Bring your weekly summary and any questions.\n\nThanks,\nAlex\n\nTraining sample.',headers:'From: Alex Chen <alex@example.com>\nAuthentication-Results: mx.example; spf=pass; dkim=pass; dmarc=pass',expected:'example.com'}};
+function el(tag,text,cls){const e=document.createElement(tag);if(text!==undefined&&text!==null)e.textContent=text;if(cls)e.className=cls;return e;}
 let hasResult=false;
-function render(r){const root=$('result');root.replaceChildren();const risk=element('div',null,'risk '+r.level);const score=element('div',String(r.score),'score');score.append(element('small','/ 100 風險指標'));const copy=element('div');copy.append(element('h3',r.level==='high'?'高風險，先暫停操作':r.level==='medium'?'有可疑線索，請先查證':'目前線索較少'),element('p','偵測到 '+r.findings.length+' 類警訊 · '+r.linkCount+' 個網址'),element('p','分數為規則加總，不是釣魚機率。'));risk.append(score,copy);root.append(risk,element('h3','判斷依據','subheading'));const list=element('div');if(!r.findings.length)list.append(element('p','未命中目前的規則。仍可能有未識別的釣魚內容，請核實來源。'));for(const f of r.findings){const box=element('article',null,'finding');const h=element('h4',f.title);h.append(element('span','+'+f.points,'weight'));box.append(h,element('div',f.evidence,'evidence'),element('p',f.why));list.append(box);}root.append(list);const advice=element('div',null,'advice');advice.append(element('strong','下一步怎麼做？'),element('div',r.level==='high'?'先不要點連結、回覆或開啟附件。自行進入官方網站或聯絡已知窗口查證；若已提供密碼，請從官方管道更改密碼並通知資訊人員。':'透過已知的官方網站、App 或電話確認寄件目的，尤其是涉及登入、付款或敏感資料時。'));root.append(advice);hasResult=true;}
-function run(data){const r=analyze(data);$('sender').value=data.sender||'';$('subject').value=data.subject||'';$('body').value=data.body;updateCount();$('error').textContent='';render(r);return r;}
+function render(r){const root=$('result');root.replaceChildren();const risk=el('div',null,'risk '+r.level),score=el('div',r.score,'score');score.append(el('small','/ 100 risk index'));const copy=el('div');copy.append(el('h3',r.level==='high'?'High risk: pause and verify':r.level==='medium'?'Review required':'Few detected signals'),el('p',r.findings.length+' triggered rules · '+new Set(r.urls.map(u=>u.url)).size+' distinct URL(s)'),el('p','A heuristic score, not a phishing probability.'));risk.append(score,copy);root.append(risk);
+const cats=el('div',null,'category-grid');for(const c of r.categories){const row=el('div',null,'category');row.append(el('span',c.label),el('strong',c.score+' / '+c.cap));const meter=el('progress');meter.max=c.cap;meter.value=c.score;meter.setAttribute('aria-label',c.label);row.append(meter);cats.append(row);}root.append(cats,el('h3','Evidence & interpretation','subheading'));if(!r.findings.length)root.append(el('p','No rules triggered. Unrecognized phishing or compromised legitimate accounts remain possible.'));
+for(const f of [...r.findings].sort((a,b)=>b.points-a.points)){const article=el('article',null,'finding'),title=el('h4',f.title);title.append(el('span','+'+f.points+' raw','weight'));article.append(title,el('div',f.evidence.join('\n'),'evidence'),el('p',f.why),el('small',MailLens.groups[f.group].label+' · '+f.id,'rule-meta'));root.append(article);}
+const details=el('details',null,'report-detail');details.open=true;details.append(el('summary','Coverage & unresolved questions'));for(const c of r.coverage){const row=el('div',null,'coverage-row');row.append(el('strong',c.name+' — '+c.status),el('p',c.detail));details.append(row);}root.append(details);
+const auth=el('details',null,'report-detail');auth.append(el('summary','Authentication claims (not verified)'));for(const [k,v]of Object.entries(r.auth))auth.append(el('p',k.toUpperCase()+': '+(v.length?v.join(', '):'Not present')));auth.append(el('p','Passing claims do not reduce the score. A legitimate or compromised domain can pass authentication. Conflicting claims require review in the receiving mail service.'));root.append(auth);
+if(r.urls.length){const inv=el('details',null,'report-detail');inv.append(el('summary','URL inventory — '+new Set(r.urls.map(u=>u.url)).size+' destinations'));const displayed=new Set();for(const u of r.urls){const key=u.url+'|'+u.label;if(displayed.has(key))continue;displayed.add(key);const item=el('div',null,'coverage-row');item.append(el('strong','Actual host: '+u.host),el('div',u.url,'evidence'));if(u.label)item.append(el('p','Link label: '+u.label));item.append(el('p',u.flags.length?u.flags.map(id=>MailLens.rules.find(f=>f.id===id).title).join('; '):'No structural rules triggered. Destination safety is unknown.'));inv.append(item);}root.append(inv);}
+const advice=el('div',null,'advice');advice.append(el('strong','Recommended action'),el('div',r.level==='high'?'Do not use the email links or attachments. Verify through a known official channel and report the message to your security team.':r.level==='medium'?'Independently verify the request before sharing information, opening files, or paying. Review the missing evidence above.':'Confirm the sender and purpose before any sensitive action. A low score cannot confirm safety.'),el('p','Already shared credentials? Change them through the official service and notify your security team. For a payment, contact your bank or payment provider promptly.'));root.append(advice);
+const limits=el('details',null,'report-detail');limits.append(el('summary','Method & limitations'));for(const t of r.limitations)limits.append(el('p',t));limits.append(el('p','Score = min(100, sum of capped category scores). Each rule contributes once; repeated matches provide evidence only. Category bars show capped contributions.'));root.append(limits);hasResult=true;}
+function run(data){const r=MailLens.analyze(data);for(const k of fields)$(k).value=data[k]||'';updateCount();$('error').textContent='';render(r);return r;}
 function updateCount(){$('count').textContent=$('body').value.length.toLocaleString()+' / 100,000';}
-function edited(){updateCount();if(hasResult&&!$('stale')){const msg=element('div','內容已修改，請重新分析以更新結果。','stale');msg.id='stale';$('result').prepend(msg);}}
-for(const id of ['sender','subject','body'])$(id).addEventListener('input',edited);
-$('form').addEventListener('submit',e=>{e.preventDefault();try{run({sender:$('sender').value,subject:$('subject').value,body:$('body').value});}catch(err){$('error').textContent=err.message;}});
-document.querySelectorAll('[data-sample]').forEach(b=>b.addEventListener('click',()=>run(samples[b.dataset.sample])));
-const empty=$('result').innerHTML;$('clear').addEventListener('click',()=>{$('form').reset();$('error').textContent='';$('result').innerHTML=empty;hasResult=false;updateCount();$('body').focus();});
-if(document.modelContext?.registerTool){try{Promise.resolve(document.modelContext.registerTool({name:'analyze_email',title:'分析郵件風險',description:'以本機規則分析郵件並更新可見風險報告，不開啟連結。',inputSchema:{type:'object',properties:{sender:{type:'string',maxLength:500},subject:{type:'string',maxLength:2000},body:{type:'string',minLength:1,maxLength:100000}},required:['body'],additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:true},execute:input=>{if(!input||typeof input!=='object'||Object.keys(input).some(k=>!['sender','subject','body'].includes(k)))throw Error('輸入格式不正確');return run(input);}})).catch(()=>{});}catch{}}
+function edited(){updateCount();if(hasResult&&!$('stale')){const msg=el('div','Input changed. Analyze again to update this report.','stale');msg.id='stale';$('result').prepend(msg);}}
+for(const id of fields)$(id).addEventListener('input',edited);
+$('body').addEventListener('input',()=>setSourceStatus('Body edited. Only links still present in the current source can be inspected.'));
+$('form').addEventListener('submit',e=>{e.preventDefault();try{run(Object.fromEntries(fields.map(k=>[k,$(k).value])));}catch(err){$('error').textContent=err.message;}});
+document.querySelectorAll('[data-sample]').forEach(b=>b.addEventListener('click',()=>{run(samples[b.dataset.sample]);setSourceStatus('Training sample loaded.');}));
+const empty=$('result').innerHTML;$('clear').addEventListener('click',()=>{$('form').reset();$('error').textContent='';$('result').innerHTML=empty;hasResult=false;updateCount();$('email-file').value='';$('raw-source').value='';setSourceStatus('Plain-text input may omit button destinations. Import EML or paste rich HTML for better coverage.');$('body').focus();});
+for(const [id,g] of Object.entries(MailLens.groups)){const section=el('details');section.append(el('summary',g.label+' · cap '+g.cap));for(const rule of MailLens.rules.filter(r=>r.group===id))section.append(el('p',rule.title+' (+'+rule.points+')'));$('catalog').append(section);}
+if(document.modelContext?.registerTool){try{Promise.resolve(document.modelContext.registerTool({name:'analyze_email',title:'Analyze email risk',description:'Analyze supplied email locally and update the visible report. Does not open URLs or verify authentication.',inputSchema:{type:'object',properties:Object.fromEntries(fields.map(k=>[k,{type:'string',maxLength:({sender:500,subject:2000,body:100000,headers:50000,expected:253,attachments:5000})[k]}])),required:['body'],additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:true},execute:input=>{if(!input||typeof input!=='object'||Object.keys(input).some(k=>!fields.includes(k)))throw Error('Invalid input fields');return run(input);}})).catch(()=>{});}catch{}}
+
+
+function setSourceStatus(message){$('import-status').textContent=message;}
+let importing=false;
+async function importMessage(read,filename){
+ if(importing)return;
+ importing=true;
+ const controls=[...document.querySelectorAll('input,textarea,button')];
+ controls.forEach(c=>c.disabled=true);
+ $('import-status').setAttribute('aria-busy','true');
+ const previousStatus=$('import-status').textContent;
+ setSourceStatus('Reading and decoding locally...');
+ try{
+  const raw=await read();
+  const result=filename?await MailLensImport.parseFile(raw,filename):await MailLensImport.parseEmail(raw);
+  run({...result.data,expected:''});
+  const links=new Set(MailLens.analyze(result.data).urls.map(u=>u.url)).size;
+  setSourceStatus(result.info.kind+' imported. '+(result.info.html?'HTML link destinations retained. ':'')+links+' distinct web URL(s) found. '+result.info.warnings.join(' '));
+  $('raw-source').value='';
+ }catch(err){
+  $('error').textContent='Import failed: '+err.message;
+  setSourceStatus(previousStatus+' The last import failed; previous inputs and results were preserved.');
+ }finally{
+  importing=false;controls.forEach(c=>c.disabled=false);$('email-file').value='';$('import-status').setAttribute('aria-busy','false');
+ }
+}
+function importFile(file){
+ if(!file)return;
+ if(file.size>MailLensImport.MAX_FILE_BYTES){$('error').textContent='The file exceeds 10 MB. No input was changed.';return;}
+ return importMessage(()=>file.arrayBuffer(),file.name);
+}
+$('email-file').addEventListener('change',e=>importFile(e.target.files[0]));
+$('import-source').addEventListener('click',()=>importMessage(()=>Promise.resolve($('raw-source').value)));
+const dropZone=$('drop-zone');
+for(const event of ['dragenter','dragover'])dropZone.addEventListener(event,e=>{e.preventDefault();dropZone.classList.add('dragging');});
+dropZone.addEventListener('dragleave',()=>dropZone.classList.remove('dragging'));
+dropZone.addEventListener('drop',e=>{e.preventDefault();dropZone.classList.remove('dragging');if(e.dataTransfer.files.length!==1){$('error').textContent='Drop one email file at a time.';return;}importFile(e.dataTransfer.files[0]);});
+$('body').addEventListener('paste',e=>{
+ if(!e.clipboardData)return;
+ e.preventDefault();
+ try{
+  const target=$('body'),prepared=MailLensImport.preparePaste(e.clipboardData.getData('text/html'),e.clipboardData.getData('text/plain'),target.value,target.selectionStart,target.selectionEnd);
+  target.value=prepared.body;target.setSelectionRange(prepared.caret,prepared.caret);edited();$('error').textContent='';
+  setSourceStatus(prepared.rich?'Rich clipboard HTML preserved as source, including supplied link destinations. Clipboard content can still omit parts of the original email.':'Only plain text was supplied by the clipboard. Hidden button destinations may be missing; import EML or HTML to recover them.');
+ }catch(err){$('error').textContent=err.message;}
+});

@@ -1,0 +1,31 @@
+'use strict';
+const assert=require('node:assert/strict'),{analyze,rules}=require('../dist/engine.js');
+const check=(body,extra={})=>analyze({body,...extra});
+const has=(id,body,extra={})=>assert(check(body,extra).findings.some(f=>f.id===id),id);
+let count=0;function test(name,fn){fn();count++;console.log('PASS '+name);}
+test('ordinary message stays low',()=>assert.equal(check('Meeting Wednesday at 2 PM.').score,0));
+test('empty and oversize inputs fail',()=>{assert.throws(()=>check(' '));assert.throws(()=>check('a'.repeat(100001)));assert.throws(()=>check('ok',{headers:3}));});
+test('domain input validation',()=>{assert.throws(()=>check('ok',{expected:'https://bank.example'}));assert.throws(()=>check('ok',{expected:'bank..example'}));});
+test('HTML mismatch and entity decoding',()=>has('mismatch','<a href=https://evil.example/?a=1&amp;b=2>https://bank.example/</a>'));
+test('userinfo actual hostname',()=>{const r=check('https://bank.example@evil.example');assert.equal(r.urls[0].host,'evil.example');assert(r.findings.some(f=>f.id==='userinfo'));});
+test('numeric and IPv6 destinations',()=>{has('ip','http://2130706433');has('ip','https://[2001:db8::1]/');});
+test('shorteners IDNs ports',()=>{has('short','https://bit.ly/abc');has('idn','https://xn--pple-43d.example');has('port','https://bank.example:8443/');});
+test('expected domain boundary and embedded domain',()=>{assert(!check('https://login.bank.example',{expected:'bank.example'}).findings.some(f=>f.id==='expectedlink'));has('embedded','https://bank.example.evil.example',{expected:'bank.example'});has('expectedlink','https://evilbank.example',{expected:'bank.example'});});
+test('defanged URL normalization',()=>{const r=check('hxxps://evil[.]example/login');assert.equal(r.urls[0].host,'evil.example');});
+test('active HTML remains evidence',()=>has('active','<form action="https://evil.example"><input name=password></form>'));
+test('folded authentication header parsed',()=>{has('dmarc','ok',{headers:'Authentication-Results: mx.example;\r\n dmarc=fail; spf=softfail'});});
+test('body auth claims ignored',()=>assert.equal(check('spf=fail dmarc=fail Authentication-Results: dkim=fail').score,0));
+test('passing claims cannot cancel phishing clues',()=>assert.equal(check('Please provide your password',{headers:'Authentication-Results: mx.example; spf=pass; dkim=pass; dmarc=pass'}).score,30));
+test('conflicting authentication claims retained',()=>assert.deepEqual(check('ok',{headers:'Authentication-Results: a; spf=pass\nAuthentication-Results: b; spf=fail'}).auth.spf,['pass','fail']));
+test('reply and return domain checks',()=>{has('reply','ok',{sender:'A <a@bank.example>',headers:'Reply-To: b@evil.example'});has('return','ok',{sender:'a@bank.example',headers:'Return-Path: <bounce@mailer.example>'});});
+test('forged display and conflicting From',()=>{has('display','ok',{sender:'"support@bank.example" <x@evil.example>'});has('multiplefrom','ok',{headers:'From: a@a.example\nFrom: b@b.example'});});
+test('executable double extension and cap',()=>{const r=check('Please read the attached file.',{attachments:'invoice.pdf.exe'});assert(r.findings.some(f=>f.id==='double'));assert.equal(r.categories.find(c=>c.id==='files').raw,50);assert.equal(r.score,25);});
+test('macro archive and bidi',()=>{has('macro','enable macros');has('archive','report.zip');has('bidi','document\u202Efdp.exe');});
+test('repetition deduplicated',()=>assert.equal(check('Please enter your password. '.repeat(20)).score,30));
+test('social engineering cap',()=>assert.equal(check('Urgent. Please enter your password. Do not tell anyone.').score,40));
+test('risk bands for low, review and high scores',()=>{assert.equal(check('Please make payment. Report attached.',{sender:'a@a.example',headers:'Return-Path: b@b.example'}).score,20);const r=check('Please enter your password. invoice.exe');assert.equal(r.score,55);assert.equal(r.level,'high');assert.equal(check('urgent').level,'low');});
+test('payment sample expected 52',()=>assert.equal(check('Please process the payment today using our new bank account. Keep this confidential until the transfer is complete.',{sender:'finance@vendor.example',headers:'Reply-To: accounts@payment-change.example\nAuthentication-Results: mx.example; spf=pass; dkim=pass; dmarc=pass',expected:'vendor.example'}).score,52));
+test('missing information shown',()=>assert(check('hello').coverage.some(c=>c.status==='Not supplied')));
+test('30 unique rules',()=>{assert.equal(rules.length,30);assert.equal(new Set(rules.map(r=>r.id)).size,30);});
+console.log(count+' tests passed.');
+

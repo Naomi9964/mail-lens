@@ -1,0 +1,26 @@
+'use strict';
+const assert=require('node:assert/strict');
+(async()=>{
+const {parseEmail,parseFile,preparePaste,MAX_FILE_BYTES}=await import('../src/importer.mjs');
+const {analyze}=require('../dist/engine.js');
+let count=0;async function test(name,fn){await fn();count++;console.log('PASS '+name);}
+const header='From: =?UTF-8?B?U3VwcG9ydA==?= <support@bank.example>\r\nSubject: =?UTF-8?Q?Account_=E2=9C=93?=\r\nMIME-Version: 1.0\r\nAuthentication-Results: mx.example;\r\n dmarc=fail\r\n';
+const hidden='<p>Please enter your password.</p><a href="https://evil.example/login">Verify account</a>';
+const eml=header+'Content-Type: multipart/mixed; boundary="outer"\r\n\r\n--outer\r\nContent-Type: multipart/alternative; boundary="inner"\r\n\r\n--inner\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nPlease verify your account.\r\n--inner\r\nContent-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n'+Buffer.from(hidden).toString('base64')+'\r\n--inner--\r\n--outer\r\nContent-Type: application/octet-stream; name="invoice.pdf.exe"\r\nContent-Disposition: attachment; filename="invoice.pdf.exe"\r\nContent-Transfer-Encoding: base64\r\n\r\naGVsbG8=\r\n--outer--\r\n';
+await test('multipart base64 retains hidden button target',async()=>{const r=await parseEmail(eml);assert(r.data.body.includes('https://evil.example/login'));assert(r.data.body.includes('Please verify your account.'));assert.equal(r.data.subject,'Account ✓');assert(r.data.sender.includes('support@bank.example'));const a=analyze(r.data);assert(a.urls.some(u=>u.host==='evil.example'&&u.label==='Verify account'));assert(a.findings.some(f=>f.id==='dmarc'));assert(a.findings.some(f=>f.id==='double'));assert.equal(r.info.attachmentCount,1);});
+await test('quoted printable soft breaks retain destination',async()=>{const r=await parseEmail(header+'Content-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n<a href=3D"https://evil.exam=\r\nple/login">Continue</a>');assert(analyze(r.data).urls.some(u=>u.host==='evil.example'));});
+await test('charset decoding windows-1252',async()=>{const r=await parseEmail(Buffer.concat([Buffer.from(header+'Content-Type: text/plain; charset=windows-1252\r\n\r\n'),Buffer.from([0x63,0x61,0x66,0xe9])]));assert.equal(r.data.body.trim(),'café');});
+await test('HTML image link retained without executing image',async()=>{const r=await parseFile(new TextEncoder().encode('<a href="https://evil.example/"><img src="https://remote.example/pixel.png"></a>'),'email.html');assert(analyze(r.data).urls.some(u=>u.host==='evil.example'));});
+await test('plain EML explicitly warns about missing HTML',async()=>{const r=await parseEmail('Subject: Notice\n\nClick the button to continue.');assert.equal(r.info.html,false);assert(r.info.warnings.some(w=>w.includes('no HTML')));});
+await test('nested attached email excluded',async()=>{const raw=header+'Content-Type: multipart/mixed; boundary=x\r\n\r\n--x\r\nContent-Type: text/plain\r\n\r\nSee attached email.\r\n--x\r\nContent-Type: message/rfc822\r\nContent-Disposition: attachment; filename="forwarded.eml"\r\n\r\nFrom: a@evil.example\r\nSubject: Nested\r\n\r\nhttps://nested.example\r\n--x--';const r=await parseEmail(raw);assert(r.info.warnings.some(w=>w.includes('Attached emails')));assert(!r.data.body.includes('https://nested.example'));});
+await test('empty invalid encrypted-only and MSG rejected',async()=>{await assert.rejects(()=>parseEmail(''));await assert.rejects(()=>parseEmail('not an email'));await assert.rejects(()=>parseFile(new Uint8Array([1,2,3]),'mail.msg'));await assert.rejects(()=>parseEmail(header+'Content-Type: application/pkcs7-mime\r\n\r\naGVsbG8='));});
+await test('oversize raw and decoded body rejected without truncation',async()=>{await assert.rejects(()=>parseEmail(new Uint8Array(MAX_FILE_BYTES+1)));await assert.rejects(()=>parseEmail(header+'Content-Type: text/plain\r\n\r\n'+'x'.repeat(100001)));});
+await test('rich clipboard chooses actual HTML href',()=>{const p=preparePaste(hidden,'Verify account','',0,0);assert(p.rich);assert(analyze({body:p.body}).urls.some(u=>u.host==='evil.example'));});
+await test('clipboard insertion and selection replacement',()=>{const p=preparePaste('<a href="https://evil.example">Go</a>','Go','before OLD after',7,10);assert(p.body.startsWith('before <a'));assert(p.body.endsWith(' after'));});
+await test('plain clipboard flagged and paste limit enforced',()=>{assert.equal(preparePaste('','Click here','',0,0).rich,false);assert.throws(()=>preparePaste('','x'.repeat(100001),'old',0,3));});
+await test('entity-encoded href recovered after MIME decoding',async()=>{const r=await parseEmail(header+'Content-Type: text/html\r\n\r\n<a href="https://evil.example/?x=1&amp;y=2">Go</a>');assert(analyze(r.data).urls[0].url.endsWith('?x=1&y=2'));});
+await test('scheme-relative links and unsupported destinations are accounted for',()=>{assert.equal(analyze({body:'<a href="//evil.example/login">Go</a>'}).urls[0].host,'evil.example');assert(analyze({body:'<a href="/login">Go</a>'}).coverage.some(c=>c.name==='URL structure'&&c.status==='Partial'));});
+require('node:fs').writeFileSync('tests/hidden-link.eml',eml);
+console.log(count+' import tests passed.');
+})().catch(e=>{console.error(e);process.exitCode=1;});
+

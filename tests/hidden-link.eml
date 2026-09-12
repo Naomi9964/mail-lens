@@ -1,0 +1,27 @@
+From: =?UTF-8?B?U3VwcG9ydA==?= <support@bank.example>
+Subject: =?UTF-8?Q?Account_=E2=9C=93?=
+MIME-Version: 1.0
+Authentication-Results: mx.example;
+ dmarc=fail
+Content-Type: multipart/mixed; boundary="outer"
+
+--outer
+Content-Type: multipart/alternative; boundary="inner"
+
+--inner
+Content-Type: text/plain; charset=utf-8
+
+Please verify your account.
+--inner
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: base64
+
+PHA+UGxlYXNlIGVudGVyIHlvdXIgcGFzc3dvcmQuPC9wPjxhIGhyZWY9Imh0dHBzOi8vZXZpbC5leGFtcGxlL2xvZ2luIj5WZXJpZnkgYWNjb3VudDwvYT4=
+--inner--
+--outer
+Content-Type: application/octet-stream; name="invoice.pdf.exe"
+Content-Disposition: attachment; filename="invoice.pdf.exe"
+Content-Transfer-Encoding: base64
+
+aGVsbG8=
+--outer--
